@@ -146,6 +146,12 @@ let main () =
     (* The source program, before any compilation pass. *)
     let source_prog = prog in
 
+
+    let prog = Safetyasserts.add_asserts prog  in
+
+    Format.eprintf "@[<v>Modified syntax tree:@;%a@.@]" 
+    (Printer.pp_prog ~debug:true Arch.reg_size Arch.asmOp) prog; 
+
     (* This function is called after each compilation pass.
         - Check program safety (and exit) if the time has come
         - Pretty-print the program

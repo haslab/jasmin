@@ -1,0 +1,10 @@
+export
+fn test_div(reg u64 arg) -> reg u64 {
+reg u64 z;
+z  = arg;
+if arg!=0 {
+    z = 2 / arg;
+}
+z = 2 / 1;
+return z;
+}
