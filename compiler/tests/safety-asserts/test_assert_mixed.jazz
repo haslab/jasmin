@@ -1,0 +1,17 @@
+fn test(reg u64 str, reg u64 x) -> reg u8 {
+  stack u64[256] a;
+  reg u8 c len;
+  reg u64 r;
+  r = x/a[4];
+  len = 0;
+  while {
+    c = a[len] / (u8)[str];
+  } (c != 0) {
+    str += 1;
+    len += 1;
+  }
+  c = len / 3;
+  return len;
+}
+    
+ 

@@ -1,0 +1,6 @@
+fn test_vmovdqa(reg u64 p) {
+  reg u128 r;
+  
+  r = #VMOVDQA_128((u128)[#aligned p + 16 * 0]);
+  (u128)[#aligned p + 16 * 1] = #VMOVDQA_128(r);
+}

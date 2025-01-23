@@ -1,0 +1,9 @@
+export fn test (reg ptr u64[4] r){
+  reg ptr u64[3] r2;
+  reg ptr u64[4] r3;
+  r2 = r[1:3];
+  r3[1:3] = r2;
+}
+
+    
+ 

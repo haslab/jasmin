@@ -1,0 +1,10 @@
+export fn foo () -> reg u64 {
+  stack u64[256] a;
+  reg u64 r;
+  a.[u32 20] = 4;
+  r = a.[u64 30];
+  return r;
+}
+
+    
+ 

@@ -1,0 +1,6 @@
+export fn foo (reg u64 str) -> reg u8 {
+  reg u8 r;
+  r =  (u8)[str + 1];
+  (u32)[str] = (u32)[str + 4];
+  return r;
+}
