@@ -1,0 +1,17 @@
+fn test_init(reg ptr u16[10] rp) -> reg ptr u16[10]
+{
+  stack u16[10] cp;
+  reg u16 test;
+  inline int i;
+  for i = 9 to 0 { 
+    cp[i] = rp[i];
+    rp[i] = test;
+    test = 4;
+    rp[i] = test + 2;
+
+  }
+
+  rp[0] = test;
+
+  return rp;
+}
