@@ -1,65 +1,64 @@
-
 type double = u128;
 
 inline fn __CMPEQSD
-( reg u128 a b
-) -> reg u128
+( reg double a b
+) -> reg double
 {
   a = #CMPSD(a, b, 0);
   return a;
 }
 
 inline fn __CMPLTSD
-( reg u128 a b
-) -> reg u128
+( reg double a b
+) -> reg double
 {
   a = #CMPSD(a, b, 1);
   return a;
 }
 
 inline fn __CMPLESD
-( reg u128 a b
-) -> reg u128
+( reg double a b
+) -> reg double
 {
   a = #CMPSD(a, b, 2);
   return a;
 }
 
 inline fn __CMPUNORDSD
-( reg u128 a b
-) -> reg u128
+( reg double a b
+) -> reg double
 {
   a = #CMPSD(a, b, 3);
   return a;
 }
 
 inline fn __CMPNEQSD
-( reg u128 a b
-) -> reg u128
+( reg double a b
+) -> reg double
 {
   a = #CMPSD(a, b, 4);
   return a;
 }
 
 inline fn __CMPNLTSD
-( reg u128 a b
-) -> reg u128
+( reg double a b
+) -> reg double
 {
   a = #CMPSD(a, b, 5);
   return a;
 }
 
 inline fn __CMPNLESD
-( reg u128 a b
-) -> reg u128
+( reg double a b
+) -> reg double
 {
   a = #CMPSD(a, b, 6);
   return a;
 }
 
 inline fn __CMPORDSD
-( reg u128 a b
-) -> reg u128
+( reg double a b
+) -> reg double
 {
   a = #CMPSD(a, b, 7);
   return a;
