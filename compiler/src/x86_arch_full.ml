@@ -208,6 +208,7 @@ module X86_core = struct
     | SUBSD -> false (* Not DOIT *)
     | MULSD -> false (* Not DOIT *)
     | CMPSD -> false (* Not DOIT *)
+    | ROUNDSD -> false (* Not DOIT *)
     | CVTSI2SD _ -> false (* Not DOIT *)
     | CVTTSD2SI _ -> false (* Not DOIT *)
     | CVTSD2SI _ -> false (* Not DOIT *)
