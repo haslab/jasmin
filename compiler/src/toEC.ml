@@ -12,6 +12,12 @@ type amodel =
 
 let ws2bytes ws = (int_of_ws ws) / 8
 
+(* When set (jasmin2ec --no-safety-simplify), every request for an auxiliary
+   variable creates a fresh one: auxiliaries are otherwise shared between
+   sibling blocks when their types coincide, which makes the names and the
+   number of auxiliaries depend on array sizes. *)
+let fresh_aux = ref false
+
 module Scmp = struct
   type t = string
   let compare = compare
@@ -614,7 +620,7 @@ module Env: EnvT = struct
     let i = try Mpty.find (prefix, ty) env.count with Not_found -> 0 in
     let l = try Mpty.find (prefix, ty) !(env.auxv) with Not_found -> BatVect.empty in
     env.count <- Mpty.add (prefix,ty) (i+1) env.count;
-    if i < BatVect.length l then begin
+    if i < BatVect.length l && not !fresh_aux then begin
       BatVect.get l i
     end else begin
       let aux = create_name env prefix in

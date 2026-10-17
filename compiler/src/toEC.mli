@@ -3,6 +3,9 @@ type amodel =
   | WArray
   | BArray
 
+(* see jasmin2ec --no-safety-simplify *)
+val fresh_aux : bool ref
+
 val ty_expr : Prog.expr -> Prog.ty
 val ty_lval : Prog.lval -> Prog.ty
 val extract :

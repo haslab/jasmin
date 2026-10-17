@@ -170,11 +170,14 @@ let rec closed_expr = function
   | PappN (_, es) -> List.for_all closed_expr es
   | _ -> false
 
-(* variables of an expression / instruction, in textual order (with repetitions) *)
+(* local variables of an expression / instruction, in textual order (with
+   repetitions) *)
+let local_gv x acc = if x.gs = Expr.Slocal then L.unloc x.gv :: acc else acc
+
 let rec ordered_vars_e acc = function
   | Pconst _ | Pbool _ | Parr_init _ -> acc
-  | Pvar x -> L.unloc x.gv :: acc
-  | Pget (_, _, _, x, e) | Psub (_, _, _, x, e) -> ordered_vars_e (L.unloc x.gv :: acc) e
+  | Pvar x -> local_gv x acc
+  | Pget (_, _, _, x, e) | Psub (_, _, _, x, e) -> ordered_vars_e (local_gv x acc) e
   | Pload (_, _, e) | Papp1 (_, e) -> ordered_vars_e acc e
   | Papp2 (_, e1, e2) | Pis_mem_init (e1, e2) -> ordered_vars_e (ordered_vars_e acc e1) e2
   | PappN (_, es) -> List.fold_left ordered_vars_e acc es
@@ -212,22 +215,24 @@ let sort_shadow_init_runs (globs, funcs) =
   (* [run]: the initialisations in reverse order; [rest]: what follows them *)
   let sort_run run rest =
     let run = List.rev run in
-    let xs = List.map fst run in
-    let distinct = List.length (List.sort_uniq V.compare xs) = List.length xs in
-    if not distinct then List.map snd run
-    else
-      let uses = List.rev (ordered_vars_c [] rest) in
-      let first = Hv.create 17 in
-      List.iteri (fun k x -> if not (Hv.mem first x) then Hv.add first x k) uses;
-      let key x = try Hv.find first x with Not_found -> max_int in
-      List.map snd (List.stable_sort (fun (x, _) (y, _) -> compare (key x) (key y)) run)
+    let uses = List.rev (ordered_vars_c [] rest) in
+    let first = Hv.create 17 in
+    List.iteri (fun k x -> if not (Hv.mem first x) then Hv.add first x k) uses;
+    let key x = try Hv.find first x with Not_found -> max_int in
+    List.map snd (List.stable_sort (fun (x, _) (y, _) -> compare (key x) (key y)) run)
   in
+  (* a run ends at the first instruction that is not such an initialisation,
+     or that assigns a variable already initialised in the run *)
   let rec stmt c =
     let rec go run acc = function
       | [] -> List.rev_append acc (sort_run run [])
       | (i :: c') as c ->
           match shadow_init i with
-          | Some x -> go ((x, i) :: run) acc c'
+          | Some x when not (List.exists (fun (y, _) -> V.equal x y) run) ->
+              go ((x, i) :: run) acc c'
+          | Some x ->
+              let acc = List.rev_append (sort_run run c) acc in
+              go [(x, i)] acc c'
           | None ->
               let acc = List.rev_append (sort_run run c) acc in
               go [] (instr i :: acc) c'
@@ -244,6 +249,26 @@ let sort_shadow_init_runs (globs, funcs) =
     { i with i_desc = d }
   in
   globs, List.map (fun f -> { f with f_body = stmt f.f_body }) funcs
+
+(* With [~simplify:false], also give the variables of every function fresh
+   identifiers in the order of their first occurrence (arguments first, then
+   the body in program order).  The safety pass creates its temporaries in an
+   order that depends on array sizes, and the EasyCrypt extraction orders the
+   locals, and numbers the homonyms ([aux], [aux_0], ...), by identifier: the
+   renumbering makes declarations and names depend on the program structure
+   only. *)
+let renumber_locals (globs, funcs) =
+  let renumber f =
+    let order = f.f_args @ List.rev (ordered_vars_c [] f.f_body) in
+    let fresh x = V.mk x.v_name x.v_kind x.v_ty x.v_dloc x.v_annot in
+    let s =
+      List.fold_left
+        (fun s x -> if Mv.mem x s then s else Mv.add x (fresh x) s)
+        Mv.empty order
+    in
+    Subst.vsubst_func s f
+  in
+  globs, List.map renumber funcs
 
 let create_safety_asserts ?(simplify = true)
    (type reg regx xreg rflag cond asm_op extra_op)
@@ -288,7 +313,7 @@ let create_safety_asserts ?(simplify = true)
       Arch.asmOp Arch.pointer_data Arch.msf_size create_var b Arch.fcp Arch.aparams.ap_is_move_op print_uprog simplify cuprog in
   let cuprog = catch_error cuprog in
   let prog =  Conv.prog_of_cuprog cuprog in
-  if simplify then prog else sort_shadow_init_runs prog
+  if simplify then prog else renumber_locals (sort_shadow_init_runs prog)
 
 
 (*--------------------------------------------------------------------- *)

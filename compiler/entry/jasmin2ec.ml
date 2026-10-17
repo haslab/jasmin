@@ -65,6 +65,7 @@ let parse_and_extract arch call_conv idirs =
   in
   fun model amodel no_simplify functions array_dir output output_proof pass file warn ->
     if not warn then nowarning ();
+    ToEC.fresh_aux := no_simplify;
     match extract model amodel no_simplify functions array_dir output output_proof pass file with
     | () -> ()
     | exception HiError e ->
@@ -107,8 +108,9 @@ let no_safety_simplify =
      constant propagation nor dead-code elimination). Every safety assertion is \
      kept, including the statically true ones, and expressions and branches that \
      only depend on compile-time values (e.g. $(i,param) declarations) are left \
-     unevaluated; the initialisations of the init-tracking variables are emitted \
-     in an order that does not depend on array sizes. The shape of the extracted \
+     unevaluated; the initialisations of the init-tracking variables, the \
+     numbering of variables and the auxiliary variables of the extraction do \
+     not depend on array sizes. The shape of the extracted \
      program then does not depend on the values of the parameters, which is what \
      parametric safety proofs need."
   in
