@@ -17,7 +17,15 @@ Context {fcp : FlagCombinationParams}.
 Context (is_move_op : asm_op_t -> bool).
 Context (print_uprog : string -> _uprog -> _uprog).
 
-Definition create_safety_asserts (p: _uprog): result compiler_util.pp_error_loc _uprog :=
+(* When [simplify] is false, the instrumented program is returned without the
+   final constant propagation and dead-code elimination: every safety
+   assertion is kept, including the statically true ones, and expressions and
+   branches that only depend on compile-time values (e.g. [param] declarations)
+   are left unevaluated.  The shape of the result then does not depend on the
+   values of the parameters, which is what parametric safety proofs need
+   (the OCaml caller also puts the shadow-array initialisations in a
+   size-independent order, see Compile.create_safety_asserts). *)
+Definition create_safety_asserts (simplify: bool) (p: _uprog): result compiler_util.pp_error_loc _uprog :=
   (* First add the safety conditions *)
   let p := insert_cast_prog p in
   let p := print_uprog "insert cast " p in
@@ -36,13 +44,15 @@ Definition create_safety_asserts (p: _uprog): result compiler_util.pp_error_loc 
   *)
   let p := contracts_asserts_prog p in
   let p := print_uprog "contracts asserts" p in
-  (* Performs constant propagation *)
-  let p := rm_var_init_const_prop B p in
-  let p := print_uprog "constant prop" p in
-  (* Dead code *)
-  let p := rm_var_init_dc is_move_op p in
-  let p := print_uprog "rm var init" p in
-  ok p
+  if simplify then
+    (* Performs constant propagation *)
+    let p := rm_var_init_const_prop B p in
+    let p := print_uprog "constant prop" p in
+    (* Dead code *)
+    let p := rm_var_init_dc is_move_op p in
+    let p := print_uprog "rm var init" p in
+    ok p
+  else ok p
 .
 
 End SAFETY_ASSERTS.

@@ -51,19 +51,21 @@ let extract_to_file prog arch pd msfsz asmOp model amodel fnames array_dir outfi
 
 let parse_and_extract arch call_conv idirs =
   let module A = (val CoreArchFactory.get_arch_module arch call_conv) in
-  let extract model amodel functions array_dir output output_proof pass file =
+  let extract model amodel no_simplify functions array_dir output output_proof pass file =
     let safety =
       match model with
        | SafetyAnnotations -> true
        | _ -> false
     in
-    let prog = parse_and_compile (module A) ~wi2i:true ~safety:safety pass file idirs in
+    let prog =
+      parse_and_compile (module A) ~wi2i:true ~safety
+        ~safety_simplify:(not no_simplify) pass file idirs in
     extract_to_file prog arch A.reg_size  A.msf_size A.asmOp model amodel functions
       array_dir output output_proof
   in
-  fun model amodel functions array_dir output output_proof pass file warn ->
+  fun model amodel no_simplify functions array_dir output output_proof pass file warn ->
     if not warn then nowarning ();
-    match extract model amodel functions array_dir output output_proof pass file with
+    match extract model amodel no_simplify functions array_dir output output_proof pass file with
     | () -> ()
     | exception HiError e ->
         Format.eprintf "%a@." pp_hierror e;
@@ -98,6 +100,19 @@ let array_model =
      (Deprecated) $(b,old): old representation for array operations (anonymous functions instead of eclib functions)."
   in
   Arg.(value & opt (Arg.enum alts) ToEC.BArray & info [ "array-model" ] ~doc)
+
+let no_safety_simplify =
+  let doc =
+    "Safety model only: do not simplify the instrumented program (no final \
+     constant propagation nor dead-code elimination). Every safety assertion is \
+     kept, including the statically true ones, and expressions and branches that \
+     only depend on compile-time values (e.g. $(i,param) declarations) are left \
+     unevaluated; the initialisations of the init-tracking variables are emitted \
+     in an order that does not depend on array sizes. The shape of the extracted \
+     program then does not depend on the values of the parameters, which is what \
+     parametric safety proofs need."
+  in
+  Arg.(value & flag & info [ "no-safety-simplify" ] ~doc)
 
 let functions =
   let doc =
@@ -152,5 +167,6 @@ let () =
   Cmd.v info
     Term.(
       const parse_and_extract $ arch $ call_conv $ idirs $ model $ array_model
-      $ functions $ array_dir $ output $ output_proof $ after_pass $ file $ warn)
+      $ no_safety_simplify $ functions $ array_dir $ output $ output_proof
+      $ after_pass $ file $ warn)
   |> Cmd.eval |> exit

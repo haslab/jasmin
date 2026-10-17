@@ -19,6 +19,8 @@ val parse_and_compile :
   wi2i:bool ->
   (* true => start by replacing wint operation by int operation *)
   safety:bool ->
+  ?safety_simplify:bool ->
+  (* false => the safety instrumentation is not simplified *)
   Compiler.compiler_step ->
   string ->
   (string * string) list ->

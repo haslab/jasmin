@@ -154,7 +154,98 @@ let add_default_contracts prog : global_decl list * (int, 'a, 'b) gfunc list =
   let globs,funcs = prog in
   globs,List.map add_default_contract funcs
 
-let create_safety_asserts
+(* With [~simplify:false], the instrumented program is extracted as generated.
+   The safety pass starts every function with the initialisations of its
+   init-tracking variables ([b_x <- false] for scalars, [b_x <- (0, ..., 0)]
+   for arrays) in the order of a variable set, which compares array types by
+   size: that order would depend on the values of the parameters.  Each
+   maximal run of such initialisations is put in the order of the first use of
+   their variables in the rest of the body, which only depends on the program
+   structure.  Their right-hand sides are constants and their variables
+   pairwise distinct, so the reordering does not change the semantics. *)
+let rec closed_expr = function
+  | Pconst _ | Pbool _ | Parr_init _ -> true
+  | Papp1 (_, e) -> closed_expr e
+  | Papp2 (_, e1, e2) -> closed_expr e1 && closed_expr e2
+  | PappN (_, es) -> List.for_all closed_expr es
+  | _ -> false
+
+(* variables of an expression / instruction, in textual order (with repetitions) *)
+let rec ordered_vars_e acc = function
+  | Pconst _ | Pbool _ | Parr_init _ -> acc
+  | Pvar x -> L.unloc x.gv :: acc
+  | Pget (_, _, _, x, e) | Psub (_, _, _, x, e) -> ordered_vars_e (L.unloc x.gv :: acc) e
+  | Pload (_, _, e) | Papp1 (_, e) -> ordered_vars_e acc e
+  | Papp2 (_, e1, e2) | Pis_mem_init (e1, e2) -> ordered_vars_e (ordered_vars_e acc e1) e2
+  | PappN (_, es) -> List.fold_left ordered_vars_e acc es
+  | Pif (_, e1, e2, e3) -> ordered_vars_e (ordered_vars_e (ordered_vars_e acc e1) e2) e3
+  | Pbig (e1, _, x, e2, e3, e4) ->
+      List.fold_left ordered_vars_e (L.unloc x :: acc) [e1; e2; e3; e4]
+  | Pis_var_init x -> L.unloc x :: acc
+
+let ordered_vars_lv acc = function
+  | Lnone _ -> acc
+  | Lvar x -> L.unloc x :: acc
+  | Lmem (_, _, _, e) -> ordered_vars_e acc e
+  | Laset (_, _, _, x, e) | Lasub (_, _, _, x, e) -> ordered_vars_e (L.unloc x :: acc) e
+
+let rec ordered_vars_i acc i =
+  match i.i_desc with
+  | Cassgn (lv, _, _, e) -> ordered_vars_e (ordered_vars_lv acc lv) e
+  | Copn (lvs, _, _, es) | Csyscall (lvs, _, es) | Ccall (lvs, _, es) ->
+      List.fold_left ordered_vars_e (List.fold_left ordered_vars_lv acc lvs) es
+  | Cassert (_, e) -> ordered_vars_e acc e
+  | Cif (e, c1, c2) -> ordered_vars_c (ordered_vars_c (ordered_vars_e acc e) c1) c2
+  | Cfor (x, (_, e1, e2), c) ->
+      ordered_vars_c (ordered_vars_e (ordered_vars_e (L.unloc x :: acc) e1) e2) c
+  | Cwhile (_, c1, e, _, c2) -> ordered_vars_c (ordered_vars_e (ordered_vars_c acc c1) e) c2
+and ordered_vars_c acc c = List.fold_left ordered_vars_i acc c
+
+let sort_shadow_init_runs (globs, funcs) =
+  let shadow_init i =
+    match i.i_desc with
+    | Cassgn (Lvar x, _, _, (Pbool _ as e))
+    | Cassgn (Lvar x, _, _, (PappN (Operators.Oarray _, _) as e)) when closed_expr e ->
+        Some (L.unloc x)
+    | _ -> None
+  in
+  (* [run]: the initialisations in reverse order; [rest]: what follows them *)
+  let sort_run run rest =
+    let run = List.rev run in
+    let xs = List.map fst run in
+    let distinct = List.length (List.sort_uniq V.compare xs) = List.length xs in
+    if not distinct then List.map snd run
+    else
+      let uses = List.rev (ordered_vars_c [] rest) in
+      let first = Hv.create 17 in
+      List.iteri (fun k x -> if not (Hv.mem first x) then Hv.add first x k) uses;
+      let key x = try Hv.find first x with Not_found -> max_int in
+      List.map snd (List.stable_sort (fun (x, _) (y, _) -> compare (key x) (key y)) run)
+  in
+  let rec stmt c =
+    let rec go run acc = function
+      | [] -> List.rev_append acc (sort_run run [])
+      | (i :: c') as c ->
+          match shadow_init i with
+          | Some x -> go ((x, i) :: run) acc c'
+          | None ->
+              let acc = List.rev_append (sort_run run c) acc in
+              go [] (instr i :: acc) c'
+    in
+    go [] [] c
+  and instr i =
+    let d =
+      match i.i_desc with
+      | Cif (e, c1, c2) -> Cif (e, stmt c1, stmt c2)
+      | Cfor (x, r, c) -> Cfor (x, r, stmt c)
+      | Cwhile (a, c1, e, info, c2) -> Cwhile (a, stmt c1, e, info, stmt c2)
+      | d -> d
+    in
+    { i with i_desc = d }
+  in
+  globs, List.map (fun f -> { f with f_body = stmt f.f_body }) funcs
+
+let create_safety_asserts ?(simplify = true)
    (type reg regx xreg rflag cond asm_op extra_op)
     (module Arch : Arch_full.Arch
       with type reg = reg
@@ -194,10 +285,10 @@ let create_safety_asserts
 
   let cuprog =
     Compiler_extraction.create_safety_asserts
-      Arch.asmOp Arch.pointer_data Arch.msf_size create_var b Arch.fcp Arch.aparams.ap_is_move_op print_uprog cuprog in
+      Arch.asmOp Arch.pointer_data Arch.msf_size create_var b Arch.fcp Arch.aparams.ap_is_move_op print_uprog simplify cuprog in
   let cuprog = catch_error cuprog in
   let prog =  Conv.prog_of_cuprog cuprog in
-  prog
+  if simplify then prog else sort_shadow_init_runs prog
 
 
 (*--------------------------------------------------------------------- *)
