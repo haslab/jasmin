@@ -19,8 +19,20 @@ val parse_and_compile :
   wi2i:bool ->
   (* true => start by replacing wint operation by int operation *)
   safety:bool ->
-  ?safety_simplify:bool ->
-  (* false => the safety instrumentation is not simplified *)
+  ?safety_simplify:
+    (( unit,
+       ( 'reg,
+         'regx,
+         'xreg,
+         'rflag,
+         'cond,
+         'asm_op,
+         'extra_op )
+       Arch_extra.extended_op )
+     Prog.func ->
+    bool) ->
+  (* the functions [f] with [safety_simplify f = false] are kept unsimplified
+     by the safety instrumentation; default: none *)
   Compiler.compiler_step ->
   string ->
   (string * string) list ->

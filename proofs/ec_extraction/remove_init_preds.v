@@ -446,4 +446,35 @@ Definition rm_var_init_dc (p: uprog) :  _uprog :=
   | Error e => p
   end.
 
+(* [rm_var_init_const_prop] and [rm_var_init_dc] restricted to the functions
+   [fn] such that [keep fn]: the other functions are left unchanged.  Both
+   passes are intraprocedural, so a selected function is simplified exactly
+   as by the unrestricted passes, which they coincide with when [keep] is
+   [fun _ => true]. *)
+Definition rm_var_init_const_prop_fn (keep: funname -> bool) (p: uprog) : uprog :=
+  let bX := all_b_vars(vars_p (p_funcs p)) in
+  (* Function for const_prop to only propagate the B variables *)
+  let fun_cp := fun (lv: lval) (_: assgn_tag) (_: pexpr) =>
+              let x := lv_get_var lv in
+              match x with
+              | Some x => Sv.mem x bX
+              | None => false
+              end
+  in
+  map_prog_name
+    (fun fn fd => if keep fn then const_prop_fun false p.(p_globs) fun_cp fd else fd)
+    p
+.
+
+Definition rm_var_init_dc_fn (keep: funname -> bool) (p: uprog) : _uprog :=
+  let dc fn (fd: ufundef) :=
+    if keep fn then dead_code_fd is_move_op false (fun _ => None) fn fd
+    else ok fd
+  in
+  match map_cfprog_name dc (p_funcs p) with
+  | Ok funcs =>
+    {| p_extra := p_extra p; p_globs := p_globs p; p_funcs := funcs |}
+  | Error e => p
+  end.
+
 End EXPR.

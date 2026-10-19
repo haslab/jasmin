@@ -17,15 +17,19 @@ Context {fcp : FlagCombinationParams}.
 Context (is_move_op : asm_op_t -> bool).
 Context (print_uprog : string -> _uprog -> _uprog).
 
-(* When [simplify] is false, the instrumented program is returned without the
-   final constant propagation and dead-code elimination: every safety
-   assertion is kept, including the statically true ones, and expressions and
-   branches that only depend on compile-time values (e.g. [param] declarations)
-   are left unevaluated.  The shape of the result then does not depend on the
-   values of the parameters, which is what parametric safety proofs need
-   (the OCaml caller also puts the shadow-array initialisations in a
-   size-independent order, see Compile.create_safety_asserts). *)
-Definition create_safety_asserts (simplify: bool) (p: _uprog): result compiler_util.pp_error_loc _uprog :=
+(* The final constant propagation and dead-code elimination are only applied
+   to the functions [fn] such that [simplify_fn fn] (by default, all of them).
+   The other functions are returned as instrumented: every safety assertion is
+   kept, including the statically true ones, and expressions and branches that
+   only depend on compile-time values (e.g. [param] declarations) are left
+   unevaluated.  The shape of their extraction then does not depend on the
+   values of the parameters, which is what parametric safety proofs need (the
+   OCaml caller also puts their shadow-array initialisations in a
+   size-independent order and renumbers their variables, see
+   Compile.create_safety_asserts).  Both passes are intraprocedural, so a
+   selected function is simplified exactly as when all of them are, e.g. as in
+   the extraction of a library whose safety models are reused. *)
+Definition create_safety_asserts (simplify_fn: funname -> bool) (p: _uprog): result compiler_util.pp_error_loc _uprog :=
   (* First add the safety conditions *)
   let p := insert_cast_prog p in
   let p := print_uprog "insert cast " p in
@@ -44,15 +48,13 @@ Definition create_safety_asserts (simplify: bool) (p: _uprog): result compiler_u
   *)
   let p := contracts_asserts_prog p in
   let p := print_uprog "contracts asserts" p in
-  if simplify then
-    (* Performs constant propagation *)
-    let p := rm_var_init_const_prop B p in
-    let p := print_uprog "constant prop" p in
-    (* Dead code *)
-    let p := rm_var_init_dc is_move_op p in
-    let p := print_uprog "rm var init" p in
-    ok p
-  else ok p
+  (* Performs constant propagation (on the functions selected by [simplify_fn]) *)
+  let p := rm_var_init_const_prop_fn B simplify_fn p in
+  let p := print_uprog "constant prop" p in
+  (* Dead code (same functions) *)
+  let p := rm_var_init_dc_fn is_move_op simplify_fn p in
+  let p := print_uprog "rm var init" p in
+  ok p
 .
 
 End SAFETY_ASSERTS.

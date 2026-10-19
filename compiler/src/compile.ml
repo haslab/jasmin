@@ -154,7 +154,8 @@ let add_default_contracts prog : global_decl list * (int, 'a, 'b) gfunc list =
   let globs,funcs = prog in
   globs,List.map add_default_contract funcs
 
-(* With [~simplify:false], the instrumented program is extracted as generated.
+(* The functions [f] such that [simplify f.f_name] is false (see
+   [create_safety_asserts]) are extracted as instrumented.
    The safety pass starts every function with the initialisations of its
    init-tracking variables ([b_x <- false] for scalars, [b_x <- (0, ..., 0)]
    for arrays) in the order of a variable set, which compares array types by
@@ -204,7 +205,8 @@ let rec ordered_vars_i acc i =
   | Cwhile (_, c1, e, _, c2) -> ordered_vars_c (ordered_vars_e (ordered_vars_c acc c1) e) c2
 and ordered_vars_c acc c = List.fold_left ordered_vars_i acc c
 
-let sort_shadow_init_runs (globs, funcs) =
+(* only applied to the functions [f] such that [only f] *)
+let sort_shadow_init_runs only (globs, funcs) =
   let shadow_init i =
     match i.i_desc with
     | Cassgn (Lvar x, _, _, (Pbool _ as e))
@@ -248,16 +250,16 @@ let sort_shadow_init_runs (globs, funcs) =
     in
     { i with i_desc = d }
   in
-  globs, List.map (fun f -> { f with f_body = stmt f.f_body }) funcs
+  globs, List.map (fun f -> if only f then { f with f_body = stmt f.f_body } else f) funcs
 
-(* With [~simplify:false], also give the variables of every function fresh
-   identifiers in the order of their first occurrence (arguments first, then
-   the body in program order).  The safety pass creates its temporaries in an
-   order that depends on array sizes, and the EasyCrypt extraction orders the
-   locals, and numbers the homonyms ([aux], [aux_0], ...), by identifier: the
-   renumbering makes declarations and names depend on the program structure
-   only. *)
-let renumber_locals (globs, funcs) =
+(* The unsimplified functions also get fresh identifiers for their variables,
+   in the order of their first occurrence (arguments first, then the body in
+   program order).  The safety pass creates its temporaries in an order that
+   depends on array sizes, and the EasyCrypt extraction orders the locals, and
+   numbers the homonyms ([aux], [aux_0], ...), by identifier: the renumbering
+   makes declarations and names depend on the program structure only.
+   Only applied to the functions [f] such that [only f]. *)
+let renumber_locals only (globs, funcs) =
   let renumber f =
     let order = f.f_args @ List.rev (ordered_vars_c [] f.f_body) in
     let fresh x = V.mk x.v_name x.v_kind x.v_ty x.v_dloc x.v_annot in
@@ -268,9 +270,13 @@ let renumber_locals (globs, funcs) =
     in
     Subst.vsubst_func s f
   in
-  globs, List.map renumber funcs
+  globs, List.map (fun f -> if only f then renumber f else f) funcs
 
-let create_safety_asserts ?(simplify = true)
+(* [simplify fn]: whether the function [fn] gets the standard final
+   simplification (constant propagation and dead-code elimination, see
+   Compiler_extraction.create_safety_asserts); the other functions are kept as
+   instrumented, with the reorderings above. *)
+let create_safety_asserts ?(simplify = fun _ -> true)
    (type reg regx xreg rflag cond asm_op extra_op)
     (module Arch : Arch_full.Arch
       with type reg = reg
@@ -313,7 +319,8 @@ let create_safety_asserts ?(simplify = true)
       Arch.asmOp Arch.pointer_data Arch.msf_size create_var b Arch.fcp Arch.aparams.ap_is_move_op print_uprog simplify cuprog in
   let cuprog = catch_error cuprog in
   let prog =  Conv.prog_of_cuprog cuprog in
-  if simplify then prog else renumber_locals (sort_shadow_init_runs prog)
+  let unsimplified f = not (simplify f.f_name) in
+  renumber_locals unsimplified (sort_shadow_init_runs unsimplified prog)
 
 
 (*--------------------------------------------------------------------- *)

@@ -49,24 +49,65 @@ let extract_to_file prog arch pd msfsz asmOp model amodel fnames array_dir outfi
   | SafetyAnnotations, _, _         -> extract (); extract_proof ()
   | _ -> extract ()
 
+(* [defined_under idirs idents f]: is the function [f] defined in a file
+   located under the directory bound to one of [idents] by [-I IDENT=path]? *)
+let defined_under idirs idents =
+  let realpath p = try Unix.realpath p with Unix.Unix_error _ -> p in
+  let dir ident =
+    match List.assoc_opt ident idirs with
+    | Some d ->
+        let d = realpath d in
+        if Stdlib.String.ends_with ~suffix:Filename.dir_sep d then d
+        else d ^ Filename.dir_sep
+    | None ->
+        hierror ~loc:Lnone ~kind:"command-line error"
+          "--safety-simplify-from=%s: %s is not bound by -I %s=PATH" ident ident ident
+  in
+  let dirs = List.map dir idents in
+  let memo = Hashtbl.create 17 in
+  fun (f : (_, _) Prog.func) ->
+    let file = f.Prog.f_loc.Location.loc_fname in
+    let file =
+      match Hashtbl.find_opt memo file with
+      | Some r -> r
+      | None -> let r = realpath file in Hashtbl.add memo file r; r
+    in
+    List.exists (fun prefix -> Stdlib.String.starts_with ~prefix file) dirs
+
 let parse_and_extract arch call_conv idirs =
   let module A = (val CoreArchFactory.get_arch_module arch call_conv) in
-  let extract model amodel no_simplify functions array_dir output output_proof pass file =
+  let extract model amodel no_simplify simplify_from functions array_dir output output_proof pass file =
     let safety =
       match model with
        | SafetyAnnotations -> true
        | _ -> false
     in
+    (* with --no-safety-simplify, only the functions defined under the
+       includes of --safety-simplify-from are simplified *)
+    let safety_simplify =
+      if safety && no_simplify then Some (defined_under idirs simplify_from)
+      else None
+    in
     let prog =
       parse_and_compile (module A) ~wi2i:true ~safety
-        ~safety_simplify:(not no_simplify) pass file idirs in
+        ?safety_simplify pass file idirs in
+    (* the unsimplified functions never share their auxiliary variables *)
+    ToEC.fresh_aux_for :=
+      (match safety_simplify with
+       | None -> fun _ -> false
+       | Some simplify_f ->
+           let fresh =
+             List.fold_left
+               (fun s f -> if simplify_f f then s else Prog.Sf.add f.Prog.f_name s)
+               Prog.Sf.empty (snd prog)
+           in
+           fun fn -> Prog.Sf.mem fn fresh);
     extract_to_file prog arch A.reg_size  A.msf_size A.asmOp model amodel functions
       array_dir output output_proof
   in
-  fun model amodel no_simplify functions array_dir output output_proof pass file warn ->
+  fun model amodel no_simplify simplify_from functions array_dir output output_proof pass file warn ->
     if not warn then nowarning ();
-    ToEC.fresh_aux := no_simplify;
-    match extract model amodel no_simplify functions array_dir output output_proof pass file with
+    match extract model amodel no_simplify simplify_from functions array_dir output output_proof pass file with
     | () -> ()
     | exception HiError e ->
         Format.eprintf "%a@." pp_hierror e;
@@ -115,6 +156,16 @@ let no_safety_simplify =
      parametric safety proofs need."
   in
   Arg.(value & flag & info [ "no-safety-simplify" ] ~doc)
+
+let safety_simplify_from =
+  let doc =
+    "With $(b,--no-safety-simplify): functions defined in files reached \
+     through the include $(docv) (of $(b,-I) $(docv)=path) are nevertheless \
+     simplified in the standard way, so that their extraction matches the one \
+     of a library extracted without $(b,--no-safety-simplify) (e.g. the \
+     formosa-keccak safety models). This option may be repeated."
+  in
+  Arg.(value & opt_all string [] & info [ "safety-simplify-from" ] ~docv:"IDENT" ~doc)
 
 let functions =
   let doc =
@@ -169,6 +220,7 @@ let () =
   Cmd.v info
     Term.(
       const parse_and_extract $ arch $ call_conv $ idirs $ model $ array_model
-      $ no_safety_simplify $ functions $ array_dir $ output $ output_proof
+      $ no_safety_simplify $ safety_simplify_from $ functions $ array_dir
+      $ output $ output_proof
       $ after_pass $ file $ warn)
   |> Cmd.eval |> exit

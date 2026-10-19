@@ -60,9 +60,9 @@ val do_wint_int :
    prog
 
 val create_safety_asserts :
-  ?simplify:bool ->
-  (* false => keep the instrumented program unsimplified (see
-     Compiler_extraction.create_safety_asserts) *)
+  ?simplify:(Prog.funname -> bool) ->
+  (* the functions [fn] with [simplify fn = false] are kept unsimplified (see
+     Compiler_extraction.create_safety_asserts); default: none *)
   (module Arch_full.Arch
      with type reg = 'reg
       and type regx = 'regx

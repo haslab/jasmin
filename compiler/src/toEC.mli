@@ -3,8 +3,9 @@ type amodel =
   | WArray
   | BArray
 
-(* see jasmin2ec --no-safety-simplify *)
-val fresh_aux : bool ref
+(* the functions whose auxiliary variables are never shared (see jasmin2ec
+   --no-safety-simplify; only used by the safety model) *)
+val fresh_aux_for : (Prog.funname -> bool) ref
 
 val ty_expr : Prog.expr -> Prog.ty
 val ty_lval : Prog.lval -> Prog.ty

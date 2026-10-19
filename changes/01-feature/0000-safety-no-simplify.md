@@ -4,4 +4,8 @@
   variables, the numbering of its variables and its auxiliary variables are
   made independent of array sizes, so that the shape of the extraction does not
   depend on the values of `param` declarations (needed for parametric safety
-  proofs).
+  proofs). With `--safety-simplify-from=IDENT` (repeatable), the functions
+  defined in files reached through the include `IDENT` (of `-I IDENT=path`)
+  nevertheless keep the standard treatment, so that their extraction matches
+  the one of a library extracted without the flag (e.g. to reuse its safety
+  models).
