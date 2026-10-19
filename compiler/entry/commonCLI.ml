@@ -57,7 +57,7 @@ let parse_and_compile (type reg regx xreg rflag cond asm_op extra_op)
        and type rflag = rflag
        and type cond = cond
        and type asm_op = asm_op
-       and type extra_op = extra_op) ~wi2i ~safety ?safety_simplify pass file idirs =
+       and type extra_op = extra_op) ~wi2i ~safety ?safety_simplify ?safety_symbolic pass file idirs =
   let _env, pprog, _ast =
     try Compile.parse_file Arch.arch_info ~idirs file with
     | Annot.AnnotationError (loc, code) ->
@@ -68,8 +68,13 @@ let parse_and_compile (type reg regx xreg rflag cond asm_op extra_op)
     | Syntax.ParseError (loc, msg) ->
         hierror ~loc:(Lone loc) ~kind:"parse error" "%s" (Option.default "" msg)
   in
-  let prog =
-    try Compile.preprocess Arch.pointer_data Arch.msf_size Arch.asmOp pprog
+  let prog, phantoms =
+    try
+      match safety_symbolic with
+      | None -> Compile.preprocess Arch.pointer_data Arch.msf_size Arch.asmOp pprog, []
+      | Some symbolic ->
+          Compile.preprocess_symbolic ~symbolic Arch.pointer_data Arch.msf_size
+            Arch.asmOp pprog
     with Typing.TyError (loc, code) ->
       hierror ~loc:(Lmore loc) ~kind:"typing error" "%s" code
   in
@@ -81,9 +86,21 @@ let parse_and_compile (type reg regx xreg rflag cond asm_op extra_op)
   let prog =
     if not safety then prog
     else
-      match safety_simplify with
-      | None -> Compile.create_safety_asserts (module Arch) prog
-      | Some simplify_f ->
+      match safety_symbolic, safety_simplify with
+      | Some symbolic, _ ->
+          (* every function is simplified; the symbolic ones get
+             size-independent orders and names *)
+          let stable =
+            List.fold_left
+              (fun s -> function
+                | Prog.MIfun f when symbolic f -> Prog.Sf.add f.Prog.f_name s
+                | _ -> s)
+              Prog.Sf.empty pprog
+          in
+          Compile.create_safety_asserts ~phantoms
+            ~stable:(fun fn -> Prog.Sf.mem fn stable) (module Arch) prog
+      | None, None -> Compile.create_safety_asserts (module Arch) prog
+      | None, Some simplify_f ->
           let simplified =
             List.fold_left
               (fun s f -> if simplify_f f then Prog.Sf.add f.Prog.f_name s else s)

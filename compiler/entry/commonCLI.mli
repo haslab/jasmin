@@ -33,6 +33,23 @@ val parse_and_compile :
     bool) ->
   (* the functions [f] with [safety_simplify f = false] are kept unsimplified
      by the safety instrumentation; default: none *)
+  ?safety_symbolic:
+    (( Prog.pexpr_,
+       unit,
+       ( 'reg,
+         'regx,
+         'xreg,
+         'rflag,
+         'cond,
+         'asm_op,
+         'extra_op )
+       Arch_extra.extended_op )
+     Prog.gfunc ->
+    bool) ->
+  (* the functions [f] with [safety_symbolic f] keep their parameters symbolic
+     through the safety instrumentation (see Compile.preprocess_symbolic);
+     every function is then simplified; overrides [safety_simplify];
+     default: none *)
   Compiler.compiler_step ->
   string ->
   (string * string) list ->

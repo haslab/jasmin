@@ -12,6 +12,15 @@ val preprocess :
 
     Raises `Typing.TyError`. *)
 
+val preprocess_symbolic :
+  symbolic:((pexpr_, unit, 'asm) gfunc -> bool) ->
+  wsize -> wsize -> 'asm asmOp -> (unit, 'asm) pprog ->
+  (unit, 'asm) prog * (var * expr) list
+(** As [preprocess], except that the parameters of the functions [f] such
+    that [symbolic f] are replaced by phantoms in expressions (see
+    [Subst.remove_params_symbolic]); also returns the phantoms with the
+    values of their parameters, for [create_safety_asserts]. *)
+
 val parse_file :
   ('reg, 'regx, 'xreg, 'rflag, 'cond, 'asm_op, 'extra_op) Pretyping.arch_info ->
   ?idirs:(string * string) list ->
@@ -63,6 +72,13 @@ val create_safety_asserts :
   ?simplify:(Prog.funname -> bool) ->
   (* the functions [fn] with [simplify fn = false] are kept unsimplified (see
      Compiler_extraction.create_safety_asserts); default: none *)
+  ?stable:(Prog.funname -> bool) ->
+  (* the functions [fn] with [stable fn] get size-independent orders and
+     names (shadow initialisations, local variables); default: the
+     unsimplified ones *)
+  ?phantoms:(Prog.var * Prog.expr) list ->
+  (* the phantoms of [preprocess_symbolic], replaced by the values of their
+     parameters after the instrumentation; default: none *)
   (module Arch_full.Arch
      with type reg = 'reg
       and type regx = 'regx

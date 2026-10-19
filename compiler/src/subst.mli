@@ -9,6 +9,19 @@ val subst_func : ('ty gvar_i -> 'ty gexpr) -> ('ty, 'info, 'asm) gfunc -> ('ty, 
 (* replace parameter by their definition everywhere in the program *)
 val remove_params : ('info, 'asm) pprog -> ('info, 'asm) prog
 
+(* [remove_params_symbolic ~symbolic p]: as [remove_params], except that in
+   the functions [fc] such that [symbolic fc] the parameters are replaced, in
+   the expressions outside of types and of the arguments of [is_arr_init], by
+   phantoms (variables of global scope that no declaration defines); also
+   returns the phantoms with the values of their parameters *)
+val remove_params_symbolic :
+  symbolic:((pexpr_, 'info, 'asm) gfunc -> bool) ->
+  ('info, 'asm) pprog -> ('info, 'asm) prog * (var * expr) list
+
+(* replace the phantoms of [remove_params_symbolic] by the values of their
+   parameters *)
+val remove_phantoms : (var * expr) list -> ('info, 'asm) prog -> ('info, 'asm) prog
+
 (* rename all variable using fresh variables *)
 val clone_func : ('info, 'asm) func -> ('info, 'asm) func
 

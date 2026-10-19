@@ -9,6 +9,12 @@ let preprocess pd msfsize asmOp p =
   Typing.check_prog pd msfsize asmOp p;
   p
 
+let preprocess_symbolic ~symbolic pd msfsize asmOp p =
+  let p, phantoms = Subst.remove_params_symbolic ~symbolic p in
+  let p = Insert_copy_and_fix_length.doit pd p in
+  Typing.check_prog pd msfsize asmOp p;
+  p, phantoms
+
 (* -------------------------------------------------------------------- *)
 
 let parse_jasmin_path s =
@@ -205,8 +211,14 @@ let rec ordered_vars_i acc i =
   | Cwhile (_, c1, e, _, c2) -> ordered_vars_c (ordered_vars_e (ordered_vars_c acc c1) e) c2
 and ordered_vars_c acc c = List.fold_left ordered_vars_i acc c
 
-(* only applied to the functions [f] such that [only f] *)
-let sort_shadow_init_runs only (globs, funcs) =
+(* only applied to the functions [f] such that [only f].
+   With [cont] (jasmin2ec --safety-symbolic-params), a variable that the rest
+   of its block does not use is ranked by its uses after the block, then by
+   its position among the returned variables: the constant propagation ends a
+   function with the assignments of the known shadow arrays of its results,
+   in the size-dependent order of a variable map, and nothing follows them in
+   the body. *)
+let sort_shadow_init_runs ?(cont = false) only (globs, funcs) =
   let shadow_init i =
     match i.i_desc with
     | Cassgn (Lvar x, _, _, (Pbool _ as e))
@@ -214,43 +226,51 @@ let sort_shadow_init_runs only (globs, funcs) =
         Some (L.unloc x)
     | _ -> None
   in
-  (* [run]: the initialisations in reverse order; [rest]: what follows them *)
-  let sort_run run rest =
+  (* [run]: the initialisations in reverse order; [rest]: what follows them
+     in their block; [after]: (with [cont]) the variables used after the
+     block, in order *)
+  let sort_run run rest after =
     let run = List.rev run in
-    let uses = List.rev (ordered_vars_c [] rest) in
+    let uses = List.rev (ordered_vars_c [] rest) @ after in
     let first = Hv.create 17 in
     List.iteri (fun k x -> if not (Hv.mem first x) then Hv.add first x k) uses;
     let key x = try Hv.find first x with Not_found -> max_int in
     List.map snd (List.stable_sort (fun (x, _) (y, _) -> compare (key x) (key y)) run)
   in
+  let after_of rest after =
+    if cont then List.rev (ordered_vars_c [] rest) @ after else [] in
   (* a run ends at the first instruction that is not such an initialisation,
      or that assigns a variable already initialised in the run *)
-  let rec stmt c =
+  let rec stmt after c =
     let rec go run acc = function
-      | [] -> List.rev_append acc (sort_run run [])
+      | [] -> List.rev_append acc (sort_run run [] after)
       | (i :: c') as c ->
           match shadow_init i with
           | Some x when not (List.exists (fun (y, _) -> V.equal x y) run) ->
               go ((x, i) :: run) acc c'
           | Some x ->
-              let acc = List.rev_append (sort_run run c) acc in
+              let acc = List.rev_append (sort_run run c after) acc in
               go [(x, i)] acc c'
           | None ->
-              let acc = List.rev_append (sort_run run c) acc in
-              go [] (instr i :: acc) c'
+              let acc = List.rev_append (sort_run run c after) acc in
+              go [] (instr (after_of c' after) i :: acc) c'
     in
     go [] [] c
-  and instr i =
+  and instr after i =
     let d =
       match i.i_desc with
-      | Cif (e, c1, c2) -> Cif (e, stmt c1, stmt c2)
-      | Cfor (x, r, c) -> Cfor (x, r, stmt c)
-      | Cwhile (a, c1, e, info, c2) -> Cwhile (a, stmt c1, e, info, stmt c2)
+      | Cif (e, c1, c2) -> Cif (e, stmt after c1, stmt after c2)
+      | Cfor (x, r, c) -> Cfor (x, r, stmt after c)
+      | Cwhile (a, c1, e, info, c2) -> Cwhile (a, stmt after c1, e, info, stmt after c2)
       | d -> d
     in
     { i with i_desc = d }
   in
-  globs, List.map (fun f -> if only f then { f with f_body = stmt f.f_body } else f) funcs
+  let body f =
+    let after = if cont then List.map L.unloc f.f_ret else [] in
+    stmt after f.f_body
+  in
+  globs, List.map (fun f -> if only f then { f with f_body = body f } else f) funcs
 
 (* The unsimplified functions also get fresh identifiers for their variables,
    in the order of their first occurrence (arguments first, then the body in
@@ -275,8 +295,13 @@ let renumber_locals only (globs, funcs) =
 (* [simplify fn]: whether the function [fn] gets the standard final
    simplification (constant propagation and dead-code elimination, see
    Compiler_extraction.create_safety_asserts); the other functions are kept as
-   instrumented, with the reorderings above. *)
-let create_safety_asserts ?(simplify = fun _ -> true)
+   instrumented.
+   [stable fn]: whether the function [fn] gets the reorderings above (by
+   default: the unsimplified functions).
+   [phantoms]: the phantoms of the symbolic parameters (see
+   Subst.remove_params_symbolic), replaced by the values of their parameters
+   after the instrumentation and its simplification. *)
+let create_safety_asserts ?(simplify = fun _ -> true) ?stable ?(phantoms = [])
    (type reg regx xreg rflag cond asm_op extra_op)
     (module Arch : Arch_full.Arch
       with type reg = reg
@@ -319,8 +344,15 @@ let create_safety_asserts ?(simplify = fun _ -> true)
       Arch.asmOp Arch.pointer_data Arch.msf_size create_var b Arch.fcp Arch.aparams.ap_is_move_op print_uprog simplify cuprog in
   let cuprog = catch_error cuprog in
   let prog =  Conv.prog_of_cuprog cuprog in
-  let unsimplified f = not (simplify f.f_name) in
-  renumber_locals unsimplified (sort_shadow_init_runs unsimplified prog)
+  let prog = Subst.remove_phantoms phantoms prog in
+  (* an explicit [stable] is the symbolic mode: the functions are simplified,
+     so their runs also need the continuation order *)
+  let cont, stable =
+    match stable with
+    | Some stable -> true, stable
+    | None -> false, fun fn -> not (simplify fn) in
+  let stable f = stable f.f_name in
+  renumber_locals stable (sort_shadow_init_runs ~cont stable prog)
 
 
 (*--------------------------------------------------------------------- *)

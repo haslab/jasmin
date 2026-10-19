@@ -150,46 +150,6 @@ let psubst_ge f = function
   | GEword e -> GEword (psubst_e f e)
   | GEarray es -> GEarray (List.map (psubst_e f) es)
 
-let psubst_prog (prog:('info, 'asm) pprog) =
-  let subst = ref (Mpv.empty : pexpr Mpv.t) in
-  let rec aux = function
-    | [] -> [], []
-    | MIparam(v,e) :: items ->
-        let g, p = aux items in
-        let f = psubst_v !subst in
-        subst := Mpv.add v (psubst_e f e) !subst;
-        g, p
-    | MIglobal (v, e) :: items ->
-      let g, p = aux items in
-      let f = psubst_v !subst in
-      let v' =
-        let v =
-          gsubst_gvar f {gv = L.mk_loc L._dummy v; gs = Expr.Sglob} in
-        assert (not (is_gkvar v)); L.unloc v.gv in
-      let e = psubst_ge f e in
-      subst := Mpv.add v (Pvar (gkglob (L.mk_loc L._dummy v'))) !subst;
-      (v', e) :: g, p
-    | MIfun fc :: items ->
-        let g, p = aux items in
-        let subst_v = psubst_v !subst in
-        let subst_ty = psubst_ty subst_v in
-        let dov v =
-          L.unloc (gsubst_vdest subst_v (L.mk_loc L._dummy v)) in
-        let aux =
-          gsubst_cf_contra (psubst_e_ subst_v) subst_v
-        in
-        let fc = {
-            fc with
-            f_tyin = List.map subst_ty fc.f_tyin;
-            f_contra = Option.bind fc.f_contra aux;
-            f_args = List.map dov fc.f_args;
-            f_body = gsubst_c (psubst_e_ subst_v) subst_v fc.f_body;
-            f_tyout = List.map subst_ty fc.f_tyout;
-            f_ret  = List.map (gsubst_vdest subst_v) fc.f_ret
-          } in
-        g, fc::p in
-    aux prog
-
 (* ---------------------------------------------------------------- *)
 (* Simplify type                                                    *)
 let int_of_op1 ?loc =
@@ -233,6 +193,238 @@ let rec int_of_expr ?loc e =
       hierror ?loc "expression %a not allowed in array size (only constant arithmetic expressions are allowed)" (Printer.pp_pexpr ~debug:false) e
 
 
+(* Symbolic parameters (jasmin2ec --model safety --safety-symbolic-params).
+   In the functions [fc] such that [symbolic fc], every occurrence of a
+   parameter in an expression is replaced by a phantom: a variable of global
+   scope that no declaration defines, standing for the parameter.  The
+   safety instrumentation and its final simplification (constant
+   propagation, dead-code elimination) treat it as an initialised,
+   never-assigned, unknown value, so they cannot evaluate the expressions
+   that depend on parameters; the phantoms are replaced by the values of
+   their parameters after the instrumentation ([remove_phantoms]).  The
+   parameters keep their values in the size positions: types (sizes of
+   arrays and sub-arrays) and the arguments of [is_arr_init], whose numeral
+   bounds let the constant propagation record that an array is fully
+   initialised. *)
+
+(* Bottom-up rewriting of the expressions of a function by [f inside],
+   where [inside] tells whether the expression is in a branch of a
+   conditional whose condition satisfies [pcond] (the contracts are not). *)
+let rec map_e f (e: pexpr) : pexpr =
+  let r = map_e f in
+  let e =
+    match e with
+    | Pconst _ | Pbool _ | Parr_init _ | Pvar _ | Pis_var_init _ -> e
+    | Pget (al, aa, ws, x, e) -> Pget (al, aa, ws, x, r e)
+    | Psub (aa, ws, len, x, e) -> Psub (aa, ws, len, x, r e)
+    | Pload (al, ws, e) -> Pload (al, ws, r e)
+    | Papp1 (o, e) -> Papp1 (o, r e)
+    | Papp2 (o, e1, e2) -> Papp2 (o, r e1, r e2)
+    | PappN (o, es) -> PappN (o, List.map r es)
+    | Pif (ty, e, e1, e2) -> Pif (ty, r e, r e1, r e2)
+    | Pbig (e, o, x, e1, e2, e0) -> Pbig (r e, o, x, r e1, r e2, r e0)
+    | Pis_mem_init (e1, e2) -> Pis_mem_init (r e1, r e2) in
+  f e
+
+(* the array stores go through [f] as the corresponding loads *)
+let map_lv f (lv: plval) : plval =
+  match lv with
+  | Lnone _ | Lvar _ -> lv
+  | Lmem (al, ws, vi, e) -> Lmem (al, ws, vi, map_e f e)
+  | Laset (al, aa, ws, x, e) ->
+    begin match f (Pget (al, aa, ws, gkvar x, map_e f e)) with
+    | Pget (_, _, _, _, e) -> Laset (al, aa, ws, x, e)
+    | _ -> assert false end
+  | Lasub (aa, ws, len, x, e) ->
+    begin match f (Psub (aa, ws, len, gkvar x, map_e f e)) with
+    | Psub (_, _, _, _, e) -> Lasub (aa, ws, len, x, e)
+    | _ -> assert false end
+
+let map_func pcond f fc =
+  let rec instr inside i =
+    let e = map_e (f inside) and lv = map_lv (f inside) and c = cmd inside in
+    let i_desc =
+      match i.i_desc with
+      | Cassgn (x, tg, ty, e1) -> Cassgn (lv x, tg, ty, e e1)
+      | Copn (xs, t, o, es) -> Copn (List.map lv xs, t, o, List.map e es)
+      | Csyscall (xs, o, es) -> Csyscall (List.map lv xs, o, List.map e es)
+      | Cassert (msg, e1) -> Cassert (msg, e e1)
+      | Cif (b, c1, c2) ->
+        let c' = cmd (inside || pcond b) in
+        Cif (e b, c' c1, c' c2)
+      | Cfor (x, (d, e1, e2), c1) -> Cfor (x, (d, e e1, e e2), c c1)
+      | Cwhile (a, c1, b, loc, c2) -> Cwhile (a, c c1, e b, loc, c c2)
+      | Ccall (xs, fn, es) -> Ccall (List.map lv xs, fn, List.map e es) in
+    { i with i_desc }
+  and cmd inside c = List.map (instr inside) c in
+  let cond = List.map (fun (p, e) -> p, map_e (f false) e) in
+  { fc with
+    f_contra =
+      Option.map (fun c -> { c with f_pre = cond c.f_pre; f_post = cond c.f_post })
+        fc.f_contra;
+    f_body = cmd false fc.f_body }
+
+(* does [e] mention a variable of [vs]? *)
+let rec mentions vs (e: pexpr) =
+  let m = mentions vs in
+  match e with
+  | Pconst _ | Pbool _ | Parr_init _ -> false
+  | Pvar x -> Spv.mem (L.unloc x.gv) vs
+  | Pis_var_init x -> Spv.mem (L.unloc x) vs
+  | Pget (_, _, _, x, e) | Psub (_, _, _, x, e) -> Spv.mem (L.unloc x.gv) vs || m e
+  | Pload (_, _, e) | Papp1 (_, e) -> m e
+  | Papp2 (_, e1, e2) | Pis_mem_init (e1, e2) -> m e1 || m e2
+  | PappN (_, es) -> List.exists m es
+  | Pif (_, e, e1, e2) -> m e || m e1 || m e2
+  | Pbig (e, _, _, e1, e2, e0) -> m e || m e1 || m e2 || m e0
+
+(* [symbolic_pre params value lit fc]: the rewritings of a symbolic function
+   before the substitution of its parameters:
+   - the arguments of is_arr_init get the values of the parameters ([value]);
+   - in the branches of the conditionals whose condition depends on
+     parameters, the literal offset of an access to an array, or of a
+     sub-array, whose size depends on parameters becomes a phantom ([lit]).
+     The bound check of such an access only involves numerals, and its truth
+     may depend on the parameters (e.g. a slice of a buffer sized for the
+     other branch, out of bounds exactly where the branch is dead): folded,
+     it would be [false] at some points and dropped at the others. *)
+let symbolic_pre params value lit fc =
+  let pdep_ty ty =
+    match ty with Arr (_, PE e) -> mentions params e | Bty _ -> false in
+  let pdep x len =
+    pdep_ty (L.unloc x.gv).v_ty || (match len with Some (PE e) -> mentions params e | None -> false) in
+  let f inside e =
+    match e with
+    | PappN (Ois_arr_init _ as o, es) -> PappN (o, List.map (psubst_e value) es)
+    | Pget (al, aa, ws, x, (Pconst _ as i)) when inside && pdep x None ->
+      Pget (al, aa, ws, x, lit i)
+    | Psub (aa, ws, len, x, (Pconst _ as i)) when inside && pdep x (Some len) ->
+      Psub (aa, ws, len, x, lit i)
+    | _ -> e in
+  map_func (mentions params) f fc
+
+(* The variable substitutions of a symbolic function: the parameters are
+   mapped by [subst_val] (to their values) in the size positions and by
+   [subst_sym] (to their phantoms) elsewhere; both rename the local variables
+   in the same way. *)
+let psubst_v_sym subst_val subst_sym =
+  let locals = ref Mpv.empty in
+  let rec aux subst v : pexpr =
+    let k = v.gs in
+    let v = v.gv in
+    let v_ = v.L.pl_desc in
+    let e =
+      match Mpv.find_opt v_ subst with
+      | Some e -> e
+      | None when k = Expr.Sglob -> Pvar { gv = v; gs = k }  (* a phantom *)
+      | None ->
+        try Mpv.find v_ !locals
+        with Not_found ->
+          assert (not (PV.is_glob v_));
+          let ty = psubst_ty (aux subst_val) v_.v_ty in
+          let v' = PV.mk v_.v_name v_.v_kind ty v_.v_dloc v_.v_annot in
+          let v = {v with L.pl_desc = v'} in
+          let v = { gv = v; gs = k } in
+          let e = Pvar v in
+          locals := Mpv.add v_ e !locals;
+          e in
+    match e with
+    | Pvar x ->
+      let k = x.gs in
+      let x = {x.gv with L.pl_loc = L.loc v} in
+      let x = {gv = x; gs = k} in
+      Pvar x
+    | _      -> e in
+  aux subst_val, aux subst_sym
+
+(* With [symbolic], also returns the phantoms, with the values of their
+   parameters; without, the substitution is the standard one. *)
+let psubst_prog ?symbolic (prog:('info, 'asm) pprog) =
+  let sym = match symbolic with Some _ -> true | None -> false in
+  let subst = ref (Mpv.empty : pexpr Mpv.t) in
+  (* with [symbolic]: [subst] with the parameters mapped to their phantoms *)
+  let subst_sym = ref (Mpv.empty : pexpr Mpv.t) in
+  let params = ref Spv.empty in
+  let phantoms = ref [] in
+  let rec aux = function
+    | [] -> [], []
+    | MIparam(v,e) :: items ->
+        let g, p = aux items in
+        let f = psubst_v !subst in
+        let e = psubst_e f e in
+        subst := Mpv.add v e !subst;
+        if sym then begin
+          let x = PV.mk v.v_name v.v_kind (psubst_ty f v.v_ty) v.v_dloc v.v_annot in
+          params := Spv.add v !params;
+          phantoms := (x, e) :: !phantoms;
+          subst_sym := Mpv.add v (Pvar (gkglob (L.mk_loc v.v_dloc x))) !subst_sym
+        end;
+        g, p
+    | MIglobal (v, e) :: items ->
+      let g, p = aux items in
+      let f = psubst_v !subst in
+      let v' =
+        let v =
+          gsubst_gvar f {gv = L.mk_loc L._dummy v; gs = Expr.Sglob} in
+        assert (not (is_gkvar v)); L.unloc v.gv in
+      let e = psubst_ge f e in
+      let gv = Pvar (gkglob (L.mk_loc L._dummy v')) in
+      subst := Mpv.add v gv !subst;
+      if sym then subst_sym := Mpv.add v gv !subst_sym;
+      (v', e) :: g, p
+    | MIfun fc :: items ->
+        let g, p = aux items in
+        let fc =
+          match symbolic with
+          | Some symbolic when symbolic fc ->
+            (* the value of a parameter, as a numeral when it is an integer
+               (as remove_phantoms prints it) *)
+            let value v =
+              let v_ = L.unloc v.gv in
+              if Spv.mem v_ !params then
+                let e = Mpv.find v_ !subst in
+                try Pconst (int_of_expr e) with HiError _ -> e
+              else Pvar v in
+            let lit i =
+              let x = PV.mk "lit" Const (Bty Int) fc.f_loc [] in
+              phantoms := (x, i) :: !phantoms;
+              Pvar (gkglob (L.mk_loc fc.f_loc x)) in
+            let fc = symbolic_pre !params value lit fc in
+            let f_val, f_sym = psubst_v_sym !subst !subst_sym in
+            let subst_ty = psubst_ty f_val in
+            let flen = psubst_e_ f_val in
+            let dov v =
+              L.unloc (gsubst_vdest f_sym (L.mk_loc L._dummy v)) in
+            {
+              fc with
+              f_tyin = List.map subst_ty fc.f_tyin;
+              f_contra = Option.bind fc.f_contra (gsubst_cf_contra flen f_sym);
+              f_args = List.map dov fc.f_args;
+              f_body = gsubst_c flen f_sym fc.f_body;
+              f_tyout = List.map subst_ty fc.f_tyout;
+              f_ret  = List.map (gsubst_vdest f_sym) fc.f_ret
+            }
+          | _ ->
+            let subst_v = psubst_v !subst in
+            let subst_ty = psubst_ty subst_v in
+            let dov v =
+              L.unloc (gsubst_vdest subst_v (L.mk_loc L._dummy v)) in
+            let aux =
+              gsubst_cf_contra (psubst_e_ subst_v) subst_v
+            in
+            {
+              fc with
+              f_tyin = List.map subst_ty fc.f_tyin;
+              f_contra = Option.bind fc.f_contra aux;
+              f_args = List.map dov fc.f_args;
+              f_body = gsubst_c (psubst_e_ subst_v) subst_v fc.f_body;
+              f_tyout = List.map subst_ty fc.f_tyout;
+              f_ret  = List.map (gsubst_vdest subst_v) fc.f_ret
+            } in
+        g, fc::p in
+    let g, p = aux prog in
+    g, p, !phantoms
+
 let isubst_len ?loc (PE e) =
   let z = int_of_expr ?loc e in
   try Z.to_int z
@@ -244,7 +436,7 @@ let isubst_ty ?loc = function
   | Arr(ty, e) -> Arr(ty, isubst_len ?loc e)
 
 
-let isubst_prog glob prog =
+let isubst_prog ?(phantoms = []) glob prog =
 
   let isubst_v subst =
     let aux v0 =
@@ -286,6 +478,14 @@ let isubst_prog glob prog =
     x, gd in
   let glob = List.map isubst_glob glob in
 
+  (* the phantoms are shared by all functions, like the globals *)
+  let phantoms =
+    List.map (fun (x, e) ->
+        let subst_v = isubst_v subst in
+        let x = gsubst_gvar subst_v {gv = L.mk_loc x.v_dloc x; gs = Expr.Sglob} in
+        L.unloc x.gv, gsubst_e isubst_len subst_v e)
+      phantoms in
+
   let subst = !subst in
 
   let isubst_item fc =
@@ -314,7 +514,7 @@ let isubst_prog glob prog =
   in
 
   let prog = List.map isubst_item prog in
-  glob, prog
+  glob, prog, phantoms
 
 
 
@@ -345,10 +545,7 @@ let rec constant_of_expr (e: Prog.expr) : Z.t =
 
   | _ -> raise NotAConstantExpr
 
-let remove_params (prog : ('info, 'asm) pprog) =
-  let globals, prog = psubst_prog prog in
-  let globals, prog = isubst_prog globals prog in
-
+let eval_globals globals =
   let global_tbl = Hv.create 101 in
   let add_glob x gv = Hv.add global_tbl x gv in
   let get_glob x = Hv.find_option global_tbl (Conv.var_of_cvar x) in
@@ -393,8 +590,42 @@ let remove_params (prog : ('info, 'asm) pprog) =
     add_glob x gv;
     x, gv
   in
-  let globals = List.rev_map doglob (List.rev globals) in
-  globals, prog
+  List.rev_map doglob (List.rev globals)
+
+let remove_params (prog : ('info, 'asm) pprog) =
+  let globals, prog, _ = psubst_prog prog in
+  let globals, prog, _ = isubst_prog globals prog in
+  eval_globals globals, prog
+
+let remove_params_symbolic ~symbolic (prog : ('info, 'asm) pprog) =
+  let globals, prog, phantoms = psubst_prog ~symbolic prog in
+  let globals, prog, phantoms = isubst_prog ~phantoms globals prog in
+  (eval_globals globals, prog), phantoms
+
+(* The phantoms are replaced by the values of their parameters, as numerals
+   when they are integers (as the standard simplification would print them:
+   the extraction of a library then does not depend on whether its
+   parameters are defined by numerals or by expressions), and by their
+   definitions otherwise (booleans, words). *)
+let remove_phantoms (phantoms : (var * expr) list) ((globs, funcs) : ('info, 'asm) prog) =
+  match phantoms with
+  | [] -> globs, funcs
+  | _ ->
+    let rec value (e: expr) =
+      match e with
+      | Pconst z -> z
+      | Papp1 (o, e1) -> int_of_op1 o (value e1)
+      | Papp2 (o, e1, e2) -> int_of_op2 o (value e1) (value e2)
+      | _ -> raise Not_found in
+    let eval e = try Pconst (value e) with Not_found | HiError _ -> e in
+    let tbl = Hv.create 17 in
+    List.iter (fun (x, e) -> Hv.replace tbl x (eval e)) phantoms;
+    let f v =
+      if is_gkvar v then Pvar v
+      else match Hv.find_option tbl (L.unloc v.gv) with
+        | Some e -> e
+        | None -> Pvar v in
+    globs, List.map (gsubst_func (fun ?loc:_ len -> len) f) funcs
 
 
 (* ---------------------------------------------------------------- *)

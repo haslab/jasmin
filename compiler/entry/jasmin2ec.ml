@@ -49,8 +49,8 @@ let extract_to_file prog arch pd msfsz asmOp model amodel fnames array_dir outfi
   | SafetyAnnotations, _, _         -> extract (); extract_proof ()
   | _ -> extract ()
 
-(* [defined_under idirs idents f]: is the function [f] defined in a file
-   located under the directory bound to one of [idents] by [-I IDENT=path]? *)
+(* [defined_under idirs idents fname]: is the file [fname] located under the
+   directory bound to one of [idents] by [-I IDENT=path]? *)
 let defined_under idirs idents =
   let realpath p = try Unix.realpath p with Unix.Unix_error _ -> p in
   let dir ident =
@@ -65,8 +65,7 @@ let defined_under idirs idents =
   in
   let dirs = List.map dir idents in
   let memo = Hashtbl.create 17 in
-  fun (f : (_, _) Prog.func) ->
-    let file = f.Prog.f_loc.Location.loc_fname in
+  fun file ->
     let file =
       match Hashtbl.find_opt memo file with
       | Some r -> r
@@ -76,38 +75,45 @@ let defined_under idirs idents =
 
 let parse_and_extract arch call_conv idirs =
   let module A = (val CoreArchFactory.get_arch_module arch call_conv) in
-  let extract model amodel no_simplify simplify_from functions array_dir output output_proof pass file =
+  let extract model amodel no_simplify symbolic simplify_from functions array_dir output output_proof pass file =
     let safety =
       match model with
        | SafetyAnnotations -> true
        | _ -> false
     in
-    (* with --no-safety-simplify, only the functions defined under the
-       includes of --safety-simplify-from are simplified *)
-    let safety_simplify =
-      if safety && no_simplify then Some (defined_under idirs simplify_from)
-      else None
+    if safety && no_simplify && symbolic then
+      hierror ~loc:Lnone ~kind:"command-line error"
+        "--no-safety-simplify and --safety-symbolic-params are exclusive";
+    (* with --no-safety-simplify or --safety-symbolic-params, the functions
+       defined under the includes of --safety-simplify-from keep the standard
+       treatment *)
+    let in_libs =
+      if safety && (no_simplify || symbolic) then defined_under idirs simplify_from
+      else fun _ -> false
     in
+    let in_lib f = in_libs f.Prog.f_loc.Location.loc_fname in
+    let safety_simplify = if safety && no_simplify then Some in_lib else None in
+    let safety_symbolic =
+      if safety && symbolic then Some (fun f -> not (in_lib f)) else None in
     let prog =
       parse_and_compile (module A) ~wi2i:true ~safety
-        ?safety_simplify pass file idirs in
-    (* the unsimplified functions never share their auxiliary variables *)
+        ?safety_simplify ?safety_symbolic pass file idirs in
+    (* the other functions never share their auxiliary variables *)
     ToEC.fresh_aux_for :=
-      (match safety_simplify with
-       | None -> fun _ -> false
-       | Some simplify_f ->
-           let fresh =
-             List.fold_left
-               (fun s f -> if simplify_f f then s else Prog.Sf.add f.Prog.f_name s)
-               Prog.Sf.empty (snd prog)
-           in
-           fun fn -> Prog.Sf.mem fn fresh);
+      (if safety && (no_simplify || symbolic) then
+         let fresh =
+           List.fold_left
+             (fun s f -> if in_lib f then s else Prog.Sf.add f.Prog.f_name s)
+             Prog.Sf.empty (snd prog)
+         in
+         fun fn -> Prog.Sf.mem fn fresh
+       else fun _ -> false);
     extract_to_file prog arch A.reg_size  A.msf_size A.asmOp model amodel functions
       array_dir output output_proof
   in
-  fun model amodel no_simplify simplify_from functions array_dir output output_proof pass file warn ->
+  fun model amodel no_simplify symbolic simplify_from functions array_dir output output_proof pass file warn ->
     if not warn then nowarning ();
-    match extract model amodel no_simplify simplify_from functions array_dir output output_proof pass file with
+    match extract model amodel no_simplify symbolic simplify_from functions array_dir output output_proof pass file with
     | () -> ()
     | exception HiError e ->
         Format.eprintf "%a@." pp_hierror e;
@@ -157,13 +163,32 @@ let no_safety_simplify =
   in
   Arg.(value & flag & info [ "no-safety-simplify" ] ~doc)
 
+let safety_symbolic_params =
+  let doc =
+    "Safety model only: keep the parameters symbolic through the safety \
+     instrumentation and its simplification (constant propagation and \
+     dead-code elimination), and substitute their values afterwards (integer \
+     parameters as numerals). Outside of the size positions (types and the \
+     arguments of $(i,is_arr_init)), every occurrence of a $(i,param) stands \
+     for a value that the simplification cannot evaluate, and so does, in the \
+     branches of a conditional that depends on parameters, the literal offset \
+     of an access to a parameter-sized array: the simplified program has the \
+     same shape at every value of the parameters, while everything that does \
+     not depend on them is simplified as usual. The initialisations of the \
+     init-tracking variables, the numbering of variables and the auxiliary \
+     variables are made independent of array sizes as with \
+     $(b,--no-safety-simplify), which this option excludes."
+  in
+  Arg.(value & flag & info [ "safety-symbolic-params" ] ~doc)
+
 let safety_simplify_from =
   let doc =
-    "With $(b,--no-safety-simplify): functions defined in files reached \
-     through the include $(docv) (of $(b,-I) $(docv)=path) are nevertheless \
-     simplified in the standard way, so that their extraction matches the one \
-     of a library extracted without $(b,--no-safety-simplify) (e.g. the \
-     formosa-keccak safety models). This option may be repeated."
+    "With $(b,--no-safety-simplify) or $(b,--safety-symbolic-params): \
+     functions defined in files reached through the include $(docv) (of \
+     $(b,-I) $(docv)=path) nevertheless get the standard treatment, so that \
+     their extraction matches the one of a library extracted without these \
+     options (e.g. the formosa-keccak safety models). This option may be \
+     repeated."
   in
   Arg.(value & opt_all string [] & info [ "safety-simplify-from" ] ~docv:"IDENT" ~doc)
 
@@ -220,7 +245,8 @@ let () =
   Cmd.v info
     Term.(
       const parse_and_extract $ arch $ call_conv $ idirs $ model $ array_model
-      $ no_safety_simplify $ safety_simplify_from $ functions $ array_dir
+      $ no_safety_simplify $ safety_symbolic_params $ safety_simplify_from
+      $ functions $ array_dir
       $ output $ output_proof
       $ after_pass $ file $ warn)
   |> Cmd.eval |> exit
